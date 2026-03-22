@@ -21,7 +21,7 @@ Script automatizado para desplegar máquinas vulnerables de DockerLabs con mapeo
 
 ```bash
 # Clonar el repositorio
-git clone https://github.com/tu-usuario/dockerlabs-autodeploy.git
+git clone https://github.com/MaxiBarcia/dockerlabs-autodeploy.git
 cd dockerlabs-autodeploy
 
 # Dar permisos de ejecución
