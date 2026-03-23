@@ -27,7 +27,8 @@ printf "  |__/ |__| |___ | \_ |___ |  \ |___ |  | |__] ___] \n"
 printf "${CNC}                                         \n"
 printf "\t\t\t\t  ${CRE} ${CNC}${CYE} ${text}${CNC} ${CRE}${CNC}\n"
 
-# Banner hecho por Ch4rum - https://instagram.com/ch4rum
+# Variables
+LOGS_HOST="/home/cft/logs_victima"
 
 # Recorre cada uno de los nombres proporcionados como parámetros
 for name in "$@"; do
@@ -66,24 +67,16 @@ detener_y_eliminar_contenedor() {
     CONTAINER_NAME="${IMAGE_NAME}_container"
 
     if [ "$(docker ps -a -q -f name=$CONTAINER_NAME -f status=exited)" ]; then
-        
         docker rm $CONTAINER_NAME > /dev/null 2>&1
     fi
 
-    
     if [ "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
-        
         docker stop $CONTAINER_NAME > /dev/null 2>&1
-
         docker rm $CONTAINER_NAME > /dev/null 2>&1
     fi
 
     if [ "$(docker images -q $IMAGE_NAME)" ]; then
         docker rmi $IMAGE_NAME > /dev/null 2>&1
-    fi
-
-    if docker network inspect $NETWORK_NAME > /dev/null 2>&1; then
-        docker network rm $NETWORK_NAME > /dev/null 2>&1
     fi
 }
 
@@ -92,8 +85,6 @@ trap ctrl_c INT
 function ctrl_c() {
     echo -e "\e[1mEliminando el laboratorio, espere un momento...\e[0m"
     detener_y_eliminar_contenedor
-    # Limpiar también los puertos en conflicto
-    docker ps -a | grep -E "2121|2222|8080|8443|13306" | awk '{print $1}' | xargs -r docker rm -f > /dev/null 2>&1
     echo -e "\nEl laboratorio ha sido eliminado por completo del sistema."
     exit 0
 }
@@ -124,106 +115,78 @@ echo -e "\e[1;93m\nEstamos desplegando la máquina vulnerable, espere un momento
 detener_y_eliminar_contenedor
 docker load -i "$TAR_FILE" > /dev/null
 
-
 if [ $? -eq 0 ]; then
 
-    IMAGE_NAME=$(basename "$TAR_FILE" .tar) # Obtiene el nombre del archivo sin la extensión .tar
+    IMAGE_NAME=$(basename "$TAR_FILE" .tar)
     CONTAINER_NAME="${IMAGE_NAME}_container"
+    HOST_IP=$(hostname -I | awk '{print $1}')
 
-    NETWORK_NAME="dockernetwork"
-
-    if docker network inspect $NETWORK_NAME > /dev/null 2>&1; then
-        echo -e "\e[38;5;230;1mLa red $NETWORK_NAME ya existe. Eliminándola y recreándola...\e[0m"
-        docker network rm $NETWORK_NAME > /dev/null 2>&1
-    fi
-
-    docker network create $NETWORK_NAME > /dev/null 2>&1
-
-# Definimos la ruta en tu Kali donde se guardarán los logs de la víctima
-    LOGS_HOST="/home/cft/logs_victima"
-
-# Creamos la carpeta si no existe
+    # Crear carpeta de logs
     mkdir -p $LOGS_HOST
     chmod 755 $LOGS_HOST 2>/dev/null
-    # Quitamos el chown problemático
-    # sudo chown root:wazuh $LOGS_HOST
 
-# Detectar puertos ocupados para evitarlos
-    USED_PORTS=$(ss -tuln | grep -E ':(2121|2222|8080|8443|13306|15432|17017|16379)' | awk '{print $5}' | cut -d: -f2 | sort -u)
+    echo -e "\e[1;96m🚀 Iniciando contenedor en modo HOST NETWORK...\e[0m"
+    
+    # Iniciar contenedor con --network host
+    docker run -d \
+        --name $CONTAINER_NAME \
+        --network host \
+        --privileged \
+        -v $LOGS_HOST:/var/log \
+        $IMAGE_NAME > /dev/null 2>&1
 
-# Lista de puertos comunes de DockerLabs
-    declare -A PORT_MAP
-    PORT_MAP=( 
-        ["80"]="8080"
-        ["443"]="8443" 
-        ["22"]="2222"
-        ["21"]="2121"
-        ["3306"]="13306"
-        ["5432"]="15432"
-        ["27017"]="17017"
-        ["6379"]="16379"
-    )
-
-# Construir los parámetros -p evitando puertos ocupados
-    PORT_PARAMS=""
-    for container_port in "${!PORT_MAP[@]}"; do
-        host_port=${PORT_MAP[$container_port]}
+    # Verificar si arrancó correctamente
+    sleep 2
+    
+    if [ -z "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
+        echo -e "\e[1;93m⚠️  El contenedor no arrancó. Mostrando logs...\e[0m"
+        docker logs $CONTAINER_NAME 2>&1 | tail -20
+        echo -e "\n\e[1;93mIntentando mantenerlo vivo con tail -f /dev/null...\e[0m"
         
-        # Verificar si el puerto host está ocupado
-        if echo "$USED_PORTS" | grep -q "^$host_port$"; then
-            # Buscar un puerto alternativo
-            alt_port=$((host_port + 100))
-            while echo "$USED_PORTS" | grep -q "^$alt_port$"; do
-                alt_port=$((alt_port + 1))
-            done
-            echo -e "\e[1;93m⚠️  Puerto $host_port ocupado, usando $alt_port para $container_port\e[0m"
-            PORT_PARAMS="$PORT_PARAMS -p $alt_port:$container_port"
-        else
-            PORT_PARAMS="$PORT_PARAMS -p $host_port:$container_port"
-        fi
-    done
-
-# Modificamos el docker run para incluir el volumen (-v)
-# Mapeamos /var/log del contenedor a nuestra carpeta del host
-    docker run -d --name $CONTAINER_NAME -v $LOGS_HOST:/var/log/apache2 $PORT_PARAMS $IMAGE_NAME > /dev/null 2>&1
-
-    if [ $? -ne 0 ]; then
-        echo -e "\e[1;91mError al iniciar el contenedor. Intentando sin mapeo de puertos...\e[0m"
-        docker run -d --name $CONTAINER_NAME -v $LOGS_HOST:/var/log/apache2 $IMAGE_NAME > /dev/null 2>&1
-        if [ $? -ne 0 ]; then
-            echo -e "\e[1;91mError fatal. Eliminando contenedor fallido...\e[0m"
-            docker rm $CONTAINER_NAME > /dev/null 2>&1
+        docker rm $CONTAINER_NAME > /dev/null 2>&1
+        docker run -d \
+            --name $CONTAINER_NAME \
+            --network host \
+            --privileged \
+            -v $LOGS_HOST:/var/log \
+            $IMAGE_NAME \
+            tail -f /dev/null > /dev/null 2>&1
+        
+        if [ -z "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
+            echo -e "\e[1;91m✗ Error fatal: No se pudo iniciar el contenedor\e[0m"
             exit 1
+        else
+            echo -e "\e[1;92m✓ Contenedor mantenido vivo con tail -f\e[0m"
         fi
-    fi
-
-    IP_ADDRESS=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTAINER_NAME)
-
-    echo -e "\e[1;96m\nMáquina desplegada, su dirección IP es --> \e[0m\e[1;97m$IP_ADDRESS\e[0m"
-    echo -e "\e[1;91m\nPresiona Ctrl+C cuando termines con la máquina para eliminarla\e[0m"
-    echo -e "\e[1;96m   📁 Logs en host: \e[0m\e[1;97m$LOGS_HOST\e[0m"
-    echo -e "\e[1;93m\n📌 PUERTOS ACCESIBLES DESDE EL HOST ($(hostname -I | awk '{print $1}')):\e[0m"
-
-# Verificar si hay puertos publicados
-    if [ -n "$(docker port $CONTAINER_NAME 2>/dev/null)" ]; then
-        docker port $CONTAINER_NAME 2>/dev/null | while read line; do
-            container_port=$(echo $line | cut -d' ' -f1)
-            host_port=$(echo $line | cut -d' ' -f3 | cut -d':' -f2)
-            echo -e "   \e[1;92m➡️  $container_port → 0.0.0.0:$host_port\e[0m"
-        done
     else
-        echo -e "   \e[1;93m⚠️  No se pudieron mapear puertos automáticamente\e[0m"
-        echo -e "   \e[1;96m   Prueba a acceder directamente al contenedor: docker exec -it $CONTAINER_NAME bash\e[0m"
-    fi
-        echo -e "\e[1;96m\n🌐 Para atacar desde Nyx, usa la IP \e[1;97m$(hostname -I | awk '{print $1}')\e[1;96m y los puertos de arriba\e[0m"
-        echo -e "\e[1;91m\n⚠️  Presiona Ctrl+C cuando termines para eliminar la máquina\e[0m"
-
-    else
-        echo -e "\e[91m\nHa ocurrido un error al cargar el laboratorio en Docker.\e[0m"
-        exit 1
+        echo -e "\e[1;92m✓ Contenedor arrancado correctamente\e[0m"
     fi
 
-# Espera indefinida para que el script no termine.
+    # Mostrar información
+    echo -e "\n\e[1;92m✅ Máquina desplegada exitosamente!\e[0m"
+    echo -e "\e[1;96m📌 Contenedor: \e[0m\e[1;97m$CONTAINER_NAME\e[0m"
+    echo -e "\e[1;96m🌐 Usando IP del host: \e[0m\e[1;97m$HOST_IP\e[0m"
+    echo -e "\e[1;96m📁 Logs en host: \e[0m\e[1;97m$LOGS_HOST\e[0m"
+    
+    echo -e "\n\e[1;93m🎯 PARA ATACAR DESDE NYX (10.10.10.3):\e[0m"
+    echo -e "   \e[1;97mEscanea directamente la IP de CFT:\e[0m"
+    echo -e "   \e[1;96m   nmap -p- 10.10.10.4\e[0m"
+    echo -e "   \e[1;96m   curl http://10.10.10.4\e[0m"
+    echo -e "   \e[1;96m   ssh root@10.10.10.4\e[0m"
+    
+    echo -e "\n\e[1;96m📝 Comandos útiles:\e[0m"
+    echo -e "   \e[1;97m• Ver estado: docker ps | grep $CONTAINER_NAME\e[0m"
+    echo -e "   \e[1;97m• Ver logs: docker logs $CONTAINER_NAME\e[0m"
+    echo -e "   \e[1;97m• Acceder: docker exec -it $CONTAINER_NAME bash\e[0m"
+    echo -e "   \e[1;97m• Ver puertos dentro: docker exec $CONTAINER_NAME netstat -tulpn\e[0m"
+    echo -e "\e[1;91m\n⚠️  Presiona Ctrl+C para eliminar la máquina\e[0m"
+
+else
+    echo -e "\e[91m\nHa ocurrido un error al cargar el laboratorio en Docker.\e[0m"
+    exit 1
+fi
+
+# Espera indefinida
 while true; do
     sleep 1
 done
